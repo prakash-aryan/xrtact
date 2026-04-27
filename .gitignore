@@ -22,7 +22,6 @@ venv/
 *.swo
 
 # Project state (per-machine)
-.claude/
 logs/
 outputs/
 .cache/
