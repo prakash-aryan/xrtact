@@ -2,8 +2,6 @@
 
 XR teleoperation of dual SO-ARM101 arms in Isaac Lab (LeIsaac), driven from a Quest 3 via [telegrip](https://github.com/DipFlip/telegrip). Bridges WebXR controllers to bimanual SO-101 articulations through a ZMQ JSON publisher; same pipeline retargets to real hardware later.
 
-Maintainer: [Prakash Aryan](https://github.com/prakash_aryan) ([prakasharyan25@gmail.com](mailto:prakasharyan25@gmail.com))
-
 ## Run
 
 ```bash
