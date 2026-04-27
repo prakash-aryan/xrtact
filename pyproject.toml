@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrtact"
+version = "0.0.1"
+description = "XR teleoperation + ACT imitation learning for dual SO-ARM101 arms via WebXR, telegrip, and Isaac Lab (LeIsaac)."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Prakash Aryan", email = "prakasharyan25@gmail.com" },
+]
+maintainers = [
+    { name = "Prakash Aryan", email = "prakasharyan25@gmail.com" },
+]
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+bridge = [
+    "pyzmq>=25",
+    "aiortc>=1.7",
+    "av>=12",
+    "numpy",
+]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100

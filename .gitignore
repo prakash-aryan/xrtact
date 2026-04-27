@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tooling
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Project state (per-machine)
+.claude/
+logs/
+outputs/
+.cache/
+*.log
+
+# Isaac Sim / Omniverse caches
+*.usdc.bak
+.isaaclab/
+
+# Local certs (telegrip auto-generates them)
+cert.pem
+key.pem
+
+# Recorded datasets - large, kept out by default
+datasets/
