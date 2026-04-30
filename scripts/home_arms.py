@@ -19,6 +19,38 @@ import signal
 import time
 
 from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
+from scservo_sdk import PortHandler, PacketHandler, COMM_SUCCESS
+
+# Feetech STS3215 register addresses
+_ADDR_TORQUE_ENABLE = 40
+_ADDR_GOAL_POSITION = 42
+_ADDR_PRESENT_POSITION = 56
+
+
+def _force_torque_on(port_name: str) -> None:
+    """Bypass lerobot and write Torque_Enable=1 + Goal_Position=current to
+    every servo on `port_name` via raw scservo_sdk. Belt-and-suspenders
+    against the case where lerobot's `torque_disabled` context manager exits
+    via an exception on the flaky id=5 and leaves some motors disabled."""
+    ph = PortHandler(port_name)
+    if not ph.openPort() or not ph.setBaudRate(1_000_000):
+        print(f"  [warn] {port_name}: could not open port to force torque on")
+        return
+    pkt = PacketHandler(0)
+    for sid in range(1, 7):
+        pos, comm, _ = pkt.read2ByteTxRx(ph, sid, _ADDR_PRESENT_POSITION)
+        if comm != COMM_SUCCESS:
+            continue
+        # set goal to current pose so it holds where it is, not jumps to a stale target
+        for _ in range(3):
+            c1, _ = pkt.write2ByteTxRx(ph, sid, _ADDR_GOAL_POSITION, pos)
+            if c1 == COMM_SUCCESS:
+                break
+        for _ in range(3):
+            c2, _ = pkt.write1ByteTxRx(ph, sid, _ADDR_TORQUE_ENABLE, 1)
+            if c2 == COMM_SUCCESS:
+                break
+    ph.closePort()
 
 
 # Calibrated home = all joints at 0 deg (the per-joint mid of the swept
@@ -68,6 +100,11 @@ def home_arm(port: str, arm_id: str, duration: float, rate: float, release: bool
             print(f"[{arm_id}] reached home pose, holding (motors stay engaged)")
     finally:
         arm.disconnect()
+        # If we're meant to keep holding, re-engage torque via raw SDK in case
+        # lerobot left some motors disabled (happens on the left arm when its
+        # flaky wrist_roll causes torque_disabled's enable_torque retry to fail).
+        if not release:
+            _force_torque_on(port)
 
 
 def main() -> None:
