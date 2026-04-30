@@ -33,8 +33,17 @@ HOME_POSE: dict[str, float] = {
 }
 
 
-def home_arm(port: str, arm_id: str, duration: float, rate: float) -> None:
-    cfg = SOFollowerRobotConfig(port=port, id=arm_id, use_degrees=True)
+def home_arm(port: str, arm_id: str, duration: float, rate: float, release: bool) -> None:
+    # disable_torque_on_disconnect controls whether SOFollower turns motors off
+    # when we disconnect at the end. Default (release=False) leaves motors
+    # engaged so the arms HOLD the home pose; otherwise they fall under gravity
+    # the instant the script exits.
+    cfg = SOFollowerRobotConfig(
+        port=port,
+        id=arm_id,
+        use_degrees=True,
+        disable_torque_on_disconnect=release,
+    )
     arm = SOFollower(cfg)
     print(f"\n[{arm_id}] connecting on {port}")
     arm.connect()
@@ -53,10 +62,12 @@ def home_arm(port: str, arm_id: str, duration: float, rate: float) -> None:
             arm.send_action(target)
             time.sleep(period)
 
-        print(f"[{arm_id}] reached home pose")
+        if release:
+            print(f"[{arm_id}] reached home pose, releasing torque on disconnect")
+        else:
+            print(f"[{arm_id}] reached home pose, holding (motors stay engaged)")
     finally:
         arm.disconnect()
-        print(f"[{arm_id}] disconnected (torque released)")
 
 
 def main() -> None:
@@ -72,6 +83,10 @@ def main() -> None:
     p.add_argument(
         "--rate", type=float, default=30.0,
         help="control rate in Hz during the ramp (default 30)",
+    )
+    p.add_argument(
+        "--release", action="store_true",
+        help="release motor torque on exit (default: keep motors engaged so arms hold the home pose)",
     )
     args = p.parse_args()
 
@@ -98,7 +113,7 @@ def main() -> None:
             print(f"[{arm_id}] skipped (interrupted)")
             continue
         try:
-            home_arm(port, arm_id, args.duration, args.rate)
+            home_arm(port, arm_id, args.duration, args.rate, release=args.release)
         except Exception as e:
             print(f"[{arm_id}] FAILED: {e}")
 
