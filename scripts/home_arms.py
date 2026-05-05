@@ -1,15 +1,8 @@
-"""home_arms.py - move SO-101 follower arm(s) to their calibrated zero pose.
+"""Drive SO-101 arms to a saved home pose via lerobot SOFollower.
 
-Connects via the lerobot SOFollower API (so the calibration we saved at
-`~/.cache/huggingface/lerobot/calibration/robots/so_follower/{id}.json` is
-applied automatically), snapshots the current joint angles, then linearly
-interpolates each joint from where it is now to 0 deg over `--duration`
-seconds at `--rate` Hz. Disconnects cleanly so the motors release torque.
-
-Usage (from the xrtact venv that has lerobot + scservo_sdk available):
-    python scripts/home_arms.py                      # both arms, 3 s ramp
-    python scripts/home_arms.py --left-only          # one arm only
-    python scripts/home_arms.py --duration 5 --rate 30
+Note: home.py is the preferred replacement - it uses raw scservo, avoids
+lerobot's flaky strict ping, and reads home_pose.json instead of the
+per-arm dict below.
 """
 
 from __future__ import annotations
@@ -21,17 +14,15 @@ import time
 from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
 from scservo_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
-# Feetech STS3215 register addresses
 _ADDR_TORQUE_ENABLE = 40
 _ADDR_GOAL_POSITION = 42
 _ADDR_PRESENT_POSITION = 56
 
 
 def _force_torque_on(port_name: str) -> None:
-    """Bypass lerobot and write Torque_Enable=1 + Goal_Position=current to
-    every servo on `port_name` via raw scservo_sdk. Belt-and-suspenders
-    against the case where lerobot's `torque_disabled` context manager exits
-    via an exception on the flaky id=5 and leaves some motors disabled."""
+    """Belt-and-suspenders re-engage torque via raw scservo, in case
+    lerobot's torque_disabled context manager exited via an exception
+    and left some motors disabled."""
     ph = PortHandler(port_name)
     if not ph.openPort() or not ph.setBaudRate(1_000_000):
         print(f"  [warn] {port_name}: could not open port to force torque on")
@@ -41,7 +32,6 @@ def _force_torque_on(port_name: str) -> None:
         pos, comm, _ = pkt.read2ByteTxRx(ph, sid, _ADDR_PRESENT_POSITION)
         if comm != COMM_SUCCESS:
             continue
-        # set goal to current pose so it holds where it is, not jumps to a stale target
         for _ in range(3):
             c1, _ = pkt.write2ByteTxRx(ph, sid, _ADDR_GOAL_POSITION, pos)
             if c1 == COMM_SUCCESS:
@@ -53,23 +43,28 @@ def _force_torque_on(port_name: str) -> None:
     ph.closePort()
 
 
-# Calibrated home = all joints at 0 deg (the per-joint mid of the swept
-# range_min/range_max captured during `lerobot-calibrate`).
-HOME_POSE: dict[str, float] = {
-    "shoulder_pan.pos": 0.0,
-    "shoulder_lift.pos": 0.0,
-    "elbow_flex.pos": 0.0,
-    "wrist_flex.pos": 0.0,
-    "wrist_roll.pos": 0.0,
-    "gripper.pos": 0.0,
+HOME_POSE_PER_ARM: dict[str, dict[str, float]] = {
+    "left_follower": {
+        "shoulder_pan.pos":  42.0,
+        "shoulder_lift.pos":  0.0,
+        "elbow_flex.pos":     0.0,
+        "wrist_flex.pos":     0.0,
+        "wrist_roll.pos":     0.0,
+        "gripper.pos":        0.0,
+    },
+    "right_follower": {
+        "shoulder_pan.pos":   5.0,
+        "shoulder_lift.pos":  0.0,
+        "elbow_flex.pos":     0.0,
+        "wrist_flex.pos":     0.0,
+        "wrist_roll.pos":     0.0,
+        "gripper.pos":        0.0,
+    },
 }
+HOME_POSE = HOME_POSE_PER_ARM["left_follower"]
 
 
 def home_arm(port: str, arm_id: str, duration: float, rate: float, release: bool) -> None:
-    # disable_torque_on_disconnect controls whether SOFollower turns motors off
-    # when we disconnect at the end. Default (release=False) leaves motors
-    # engaged so the arms HOLD the home pose; otherwise they fall under gravity
-    # the instant the script exits.
     cfg = SOFollowerRobotConfig(
         port=port,
         id=arm_id,
@@ -79,18 +74,19 @@ def home_arm(port: str, arm_id: str, duration: float, rate: float, release: bool
     arm = SOFollower(cfg)
     print(f"\n[{arm_id}] connecting on {port}")
     arm.connect()
+    target_pose = HOME_POSE_PER_ARM.get(arm_id, HOME_POSE)
     try:
         start_obs = arm.get_observation()
-        start = {k: float(start_obs[k]) for k in HOME_POSE}
+        start = {k: float(start_obs[k]) for k in target_pose}
         print(f"[{arm_id}] start pose:")
         for k, v in start.items():
-            print(f"    {k:<18s} {v:+8.2f} deg")
+            print(f"    {k:<18s} {v:+8.2f} deg  (target {target_pose[k]:+8.2f})")
 
         n_steps = max(1, int(duration * rate))
         period = 1.0 / rate
         for step in range(1, n_steps + 1):
             t = step / n_steps
-            target = {k: (1.0 - t) * start[k] + t * HOME_POSE[k] for k in HOME_POSE}
+            target = {k: (1.0 - t) * start[k] + t * target_pose[k] for k in target_pose}
             arm.send_action(target)
             time.sleep(period)
 
@@ -100,17 +96,14 @@ def home_arm(port: str, arm_id: str, duration: float, rate: float, release: bool
             print(f"[{arm_id}] reached home pose, holding (motors stay engaged)")
     finally:
         arm.disconnect()
-        # If we're meant to keep holding, re-engage torque via raw SDK in case
-        # lerobot left some motors disabled (happens on the left arm when its
-        # flaky wrist_roll causes torque_disabled's enable_torque retry to fail).
         if not release:
             _force_torque_on(port)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Move SO-101 follower(s) to calibrated zero pose")
-    p.add_argument("--left-port", default="/dev/ttyACM1")
-    p.add_argument("--right-port", default="/dev/ttyACM0")
+    p.add_argument("--left-port", default="/dev/ttyACM0")
+    p.add_argument("--right-port", default="/dev/ttyACM1")
     p.add_argument("--left-only", action="store_true")
     p.add_argument("--right-only", action="store_true")
     p.add_argument(

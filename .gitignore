@@ -37,3 +37,5 @@ key.pem
 
 # Recorded datasets - large, kept out by default
 datasets/
+scripts/home_pose.json
+
