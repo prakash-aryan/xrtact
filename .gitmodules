@@ -1,0 +1,6 @@
+[submodule "vendor/telegrip"]
+	path = vendor/telegrip
+	url = https://github.com/prakash-aryan/telegrip.git
+[submodule "vendor/leisaac"]
+	path = vendor/leisaac
+	url = https://github.com/prakash-aryan/leisaac.git
