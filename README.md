@@ -4,6 +4,9 @@ XR teleoperation + imitation learning for a bimanual SO-ARM101 setup.
 
 Quest 3 controllers drive both arms through [telegrip](https://github.com/DipFlip/telegrip)'s WebXR + IK pipeline. A side process owns the SO-101 motors via raw `scservo_sdk`, captures three cameras (overhead RealSense + two wrist Logitechs), and writes a `LeRobotDataset` whose schema matches LeHome / [LeIsaac](https://github.com/LightwheelAI/leisaac) so demos drop straight into fine-tuning the LeHome ICRA 2026 garment-folding policy.
 
+<img width="1119" height="592" alt="act_policy" src="https://github.com/user-attachments/assets/fb159862-c652-44e0-97c4-ee8ff8205379" />
+
+
 ## Layout
 
 | path | what |
