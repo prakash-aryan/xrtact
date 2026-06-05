@@ -489,15 +489,8 @@ def main() -> None:
                 time.sleep(period)
                 continue
 
-            if not last_recording_flag:
-                cmd_rad = np.concatenate([
-                    read_arm_state(left_ph, left_pkt, cal["left"], "left"),
-                    read_arm_state(right_ph, right_pkt, cal["right"], "right"),
-                ]).astype(np.float32)
-                time.sleep(period)
-                continue
-
-            # --- Motor write/read (unchanged) ---
+            # Teleop always runs regardless of recording flag.
+            # Only ds.add_frame() is gated by last_recording_flag below.
             if arm_anchor is not None and zmq_anchor is not None:
                 desired = arm_anchor + (last_target - zmq_anchor)
             else:
@@ -522,32 +515,33 @@ def main() -> None:
             lf   = left_cam_thread.get()
             rf   = right_cam_thread.get()
 
-            if top is None or lf is None or rf is None:
-                # Should not happen after wait_ready(), but guard anyway
-                n_stale_frames += 1
-                elapsed = time.time() - tick0
-                if elapsed < period:
-                    time.sleep(period - elapsed)
-                continue
+            if last_recording_flag:
+                if top is None or lf is None or rf is None:
+                    # Should not happen after wait_ready(), but guard anyway
+                    n_stale_frames += 1
+                    elapsed = time.time() - tick0
+                    if elapsed < period:
+                        time.sleep(period - elapsed)
+                    continue
 
-            ds.add_frame({
-                "observation.state": state12,
-                "action": cmd_rad.copy(),
-                "observation.images.top_rgb": top,
-                "observation.images.left_rgb": lf,
-                "observation.images.right_rgb": rf,
-                "task": args.task,
-            })
-            n_frames += 1
-            if n_frames % 30 == 1:
-                loop_ms = (time.time() - tick0) * 1000
-                print(
-                    f"  t={time.time()-start_t:5.2f}s  frame={n_frames:>4}  "
-                    f"loop={loop_ms:4.1f}ms  "
-                    f"L_lift_obs={l_state[1]:+.2f}  L_lift_cmd={cmd_rad[1]:+.2f}  "
-                    f"L_lift_tgt={last_target[1]:+.2f}  "
-                    f"R_lift_obs={r_state[1]:+.2f}  R_lift_cmd={cmd_rad[7]:+.2f}"
-                )
+                ds.add_frame({
+                    "observation.state": state12,
+                    "action": cmd_rad.copy(),
+                    "observation.images.top_rgb": top,
+                    "observation.images.left_rgb": lf,
+                    "observation.images.right_rgb": rf,
+                    "task": args.task,
+                })
+                n_frames += 1
+                if n_frames % 30 == 1:
+                    loop_ms = (time.time() - tick0) * 1000
+                    print(
+                        f"  t={time.time()-start_t:5.2f}s  frame={n_frames:>4}  "
+                        f"loop={loop_ms:4.1f}ms  "
+                        f"L_lift_obs={l_state[1]:+.2f}  L_lift_cmd={cmd_rad[1]:+.2f}  "
+                        f"L_lift_tgt={last_target[1]:+.2f}  "
+                        f"R_lift_obs={r_state[1]:+.2f}  R_lift_cmd={cmd_rad[7]:+.2f}"
+                    )
 
             elapsed = time.time() - tick0
             if elapsed < period:
