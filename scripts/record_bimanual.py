@@ -1,4 +1,10 @@
-"""Quest teleop -> both SO-101 arms -> LeRobotDataset (LeHome schema)."""
+"""Quest teleop -> both SO-101 arms -> LeRobotDataset (LeHome schema).
+
+Camera capture runs in background threads (one per camera) so the control
+loop is no longer blocked by frame acquisition. Each thread grabs
+continuously into a shared slot; the main loop reads the latest slot
+without waiting, lifting the effective rate from ~10 Hz toward 30 Hz.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ import argparse
 import json
 import os
 import signal
+import threading
 import time
 
 import cv2
@@ -43,8 +50,6 @@ ADDR_PRESENT_POSITION = 56
 ADDR_TORQUE_ENABLE = 40
 ADDR_GOAL_POSITION = 42
 
-# From LeIsaac SO101_FOLLOWER_USD_JOINT_LIMITS - the policy was trained
-# against these so we map our motor counts into this range.
 URDF_JOINT_LIMITS = {
     "shoulder_pan":  (-110.0, 110.0),
     "shoulder_lift": (-100.0, 100.0),
@@ -54,8 +59,6 @@ URDF_JOINT_LIMITS = {
     "gripper":        (-10.0, 100.0),
 }
 
-# Sign per joint to align motor count direction with URDF positive direction.
-# Empirical - flip a joint if controller motion produces inverted real motion.
 INVERT = {
     "left": {
         "shoulder_pan":  -1,
@@ -78,6 +81,131 @@ INVERT = {
 WIDTH, HEIGHT = 640, 480
 FPS = 30
 
+
+# ---------------------------------------------------------------------------
+# Background camera capture
+# ---------------------------------------------------------------------------
+
+class CameraThread(threading.Thread):
+    """Grabs frames continuously into a single shared slot.
+
+    The main loop calls .get() to read the latest frame without blocking.
+    If no frame has arrived yet, get() returns None (caller should skip or
+    retry). A threading.Event signals the thread to stop cleanly.
+    """
+
+    def __init__(self, name: str):
+        super().__init__(name=name, daemon=True)
+        self._frame: np.ndarray | None = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._ready_event = threading.Event()   # set once first frame arrives
+        self.error: Exception | None = None
+
+    def get(self) -> np.ndarray | None:
+        """Return the most recent frame (RGB, HxWx3) or None if not yet available."""
+        with self._lock:
+            return None if self._frame is None else self._frame.copy()
+
+    def wait_ready(self, timeout: float = 10.0) -> bool:
+        """Block until the first frame has been captured (or timeout)."""
+        return self._ready_event.wait(timeout)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _put(self, frame: np.ndarray) -> None:
+        with self._lock:
+            self._frame = frame
+        self._ready_event.set()
+
+
+class RealSenseCameraThread(CameraThread):
+    def __init__(self, serial: str):
+        super().__init__(name="cam-realsense")
+        self._serial = serial
+        self._pipe: rs.pipeline | None = None
+
+    def run(self) -> None:
+        try:
+            pipe = rs.pipeline()
+            cfg = rs.config()
+            cfg.enable_device(self._serial)
+            cfg.enable_stream(rs.stream.color, WIDTH, HEIGHT, rs.format.rgb8, FPS)
+            pipe.start(cfg)
+            self._pipe = pipe
+            # warm-up
+            for _ in range(5):
+                pipe.wait_for_frames(timeout_ms=2000)
+            while not self._stop_event.is_set():
+                frames = pipe.wait_for_frames(timeout_ms=2000)
+                arr = np.asanyarray(frames.get_color_frame().get_data())
+                if arr.shape[:2] != (HEIGHT, WIDTH):
+                    arr = cv2.resize(arr, (WIDTH, HEIGHT))
+                self._put(arr)
+        except Exception as e:
+            self.error = e
+        finally:
+            if self._pipe is not None:
+                try:
+                    self._pipe.stop()
+                except Exception:
+                    pass
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+class V4L2CameraThread(CameraThread):
+    def __init__(self, index: int):
+        super().__init__(name=f"cam-v4l2-{index}")
+        self._index = index
+        self._cap: cv2.VideoCapture | None = None
+
+    def run(self) -> None:
+        try:
+            cap = cv2.VideoCapture(self._index, cv2.CAP_V4L2)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS, FPS)
+            if not cap.isOpened():
+                raise RuntimeError(f"could not open /dev/video{self._index}")
+            self._cap = cap
+            time.sleep(0.3)  # let the camera settle before reading
+            # warm-up: drain any buffered stale frames
+            warmed = False
+            for _ in range(10):
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    warmed = True
+                    break
+            if not warmed:
+                raise RuntimeError(f"/dev/video{self._index} produced no frames during warm-up")
+            while not self._stop_event.is_set():
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                if frame.shape[:2] != (HEIGHT, WIDTH):
+                    frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_LINEAR)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self._put(rgb)
+        except Exception as e:
+            self.error = e
+        finally:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+# ---------------------------------------------------------------------------
+# Motor helpers (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def raw_to_urdf_rad(raw: int, jname: str, calib_entry: dict, side: str) -> float:
     rmin, rmax = calib_entry["range_min"], calib_entry["range_max"]
@@ -106,8 +234,6 @@ def urdf_rad_to_raw(rad: float, jname: str, calib_entry: dict, side: str) -> int
 def lerobot_value_to_urdf_rad(val: float, jname: str, calib_entry: dict, side: str) -> float:
     homing = calib_entry["homing_offset"]
     if jname == "gripper":
-        # Telegrip publishes 0=open / 45=closed; lerobot RANGE_0_100 has
-        # 0=range_min=closed-on-this-rig. Inverted, hence (45-val).
         rmin, rmax = calib_entry["range_min"], calib_entry["range_max"]
         pct = float(np.clip((45.0 - val) / 45.0 * 100.0, 0.0, 100.0))
         raw = int(round(rmin + pct / 100.0 * (rmax - rmin)))
@@ -132,11 +258,6 @@ def open_arm(port: str) -> tuple[PortHandler, PacketHandler]:
 
 
 def force_torque_on(port_name: str) -> None:
-    """Set Goal_Position = current then Torque_Enable = 1.
-
-    Counters lerobot's brief connect-time torque drop that lets gravity
-    drop the arm.
-    """
     ph = PortHandler(port_name)
     if not (ph.openPort() and ph.setBaudRate(1_000_000)):
         return
@@ -187,56 +308,6 @@ def write_arm_action(
                 break
 
 
-def open_v4l2(idx: int) -> cv2.VideoCapture:
-    """Open at MJPG; caller must defer .read() until ALL Logitechs are open
-    (reading right after opening one starves the other on the same controller)."""
-    cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, FPS)
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open /dev/video{idx}")
-    time.sleep(0.3)
-    return cap
-
-
-def warmup_v4l2(cap: cv2.VideoCapture, idx: int) -> None:
-    for _ in range(10):
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            return
-    raise RuntimeError(f"/dev/video{idx} produced no frames after warmup")
-
-
-def grab_v4l2_rgb(cap: cv2.VideoCapture) -> np.ndarray:
-    ok, frame = cap.read()
-    if not ok or frame is None:
-        raise RuntimeError("v4l2 grab failed")
-    if frame.shape[:2] != (HEIGHT, WIDTH):
-        frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_LINEAR)
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-
-def open_realsense() -> rs.pipeline:
-    pipe = rs.pipeline()
-    cfg = rs.config()
-    cfg.enable_device(REALSENSE_SERIAL)
-    cfg.enable_stream(rs.stream.color, WIDTH, HEIGHT, rs.format.rgb8, FPS)
-    pipe.start(cfg)
-    for _ in range(5):
-        pipe.wait_for_frames(timeout_ms=2000)
-    return pipe
-
-
-def grab_realsense_rgb(pipe: rs.pipeline) -> np.ndarray:
-    frames = pipe.wait_for_frames(timeout_ms=2000)
-    arr = np.asanyarray(frames.get_color_frame().get_data())
-    if arr.shape[:2] != (HEIGHT, WIDTH):
-        arr = cv2.resize(arr, (WIDTH, HEIGHT))
-    return arr
-
-
 def make_features() -> dict:
     state_or_action = {
         "dtype": "float32",
@@ -256,6 +327,10 @@ def make_features() -> dict:
         "observation.images.right_rgb": image,
     }
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     p = argparse.ArgumentParser()
@@ -277,16 +352,32 @@ def main() -> None:
 
     cal = load_calibrations()
 
-    print(f"[1/3] connecting RealSense (serial {REALSENSE_SERIAL})...")
-    rs_pipe = open_realsense()
-    print(f"[1/3] connecting LEFT wrist /dev/video{LEFT_CAM_INDEX}...")
-    left_cam = open_v4l2(LEFT_CAM_INDEX)
-    print(f"[1/3] connecting RIGHT wrist /dev/video{RIGHT_CAM_INDEX}...")
-    right_cam = open_v4l2(RIGHT_CAM_INDEX)
-    print("[1/3] warming up both wrist cams...")
-    warmup_v4l2(left_cam, LEFT_CAM_INDEX)
-    warmup_v4l2(right_cam, RIGHT_CAM_INDEX)
+    # --- Start camera threads (capture begins immediately in background) ---
+    print(f"[1/3] starting RealSense thread (serial {REALSENSE_SERIAL})...")
+    rs_thread = RealSenseCameraThread(REALSENSE_SERIAL)
+    rs_thread.start()
 
+    print(f"[1/3] starting LEFT wrist camera thread (/dev/video{LEFT_CAM_INDEX})...")
+    left_cam_thread = V4L2CameraThread(LEFT_CAM_INDEX)
+    left_cam_thread.start()
+
+    print(f"[1/3] starting RIGHT wrist camera thread (/dev/video{RIGHT_CAM_INDEX})...")
+    right_cam_thread = V4L2CameraThread(RIGHT_CAM_INDEX)
+    right_cam_thread.start()
+
+    print("[1/3] waiting for all cameras to produce first frame...")
+    for thread, label in [
+        (rs_thread, "RealSense"),
+        (left_cam_thread, f"LEFT wrist /dev/video{LEFT_CAM_INDEX}"),
+        (right_cam_thread, f"RIGHT wrist /dev/video{RIGHT_CAM_INDEX}"),
+    ]:
+        if not thread.wait_ready(timeout=15.0):
+            raise RuntimeError(f"{label} did not produce a frame within 15 s")
+        if thread.error:
+            raise RuntimeError(f"{label} camera thread failed: {thread.error}")
+        print(f"  {label} ready")
+
+    # --- Arms ---
     print(f"[2/3] opening LEFT arm {LEFT_PORT}...")
     left_ph, left_pkt = open_arm(LEFT_PORT)
     print(f"[2/3] opening RIGHT arm {RIGHT_PORT}...")
@@ -295,6 +386,7 @@ def main() -> None:
     force_torque_on(LEFT_PORT)
     force_torque_on(RIGHT_PORT)
 
+    # --- ZMQ ---
     print(f"[3/3] subscribing to telegrip on {args.zmq_endpoint}...")
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.SUB)
@@ -305,6 +397,7 @@ def main() -> None:
     poller = zmq.Poller()
     poller.register(sock, zmq.POLLIN)
 
+    # --- Dataset ---
     features = make_features()
     ds_root = os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.repo_id}")
     if os.path.exists(ds_root):
@@ -332,14 +425,11 @@ def main() -> None:
     n_frames = 0
     last_target = None
     last_recording_flag = False
-
-    # When recording flag rises we capture (arm_anchor, zmq_anchor) and from
-    # then on command arm = arm_anchor + (zmq_target - zmq_anchor). This
-    # tracks controller motion deltas instead of absolute IK output, which
-    # avoids slamming because telegrip's IK frame doesn't match our motor
-    # calibration frame.
     arm_anchor = None
     zmq_anchor = None
+
+    # Frames missed because a camera thread hadn't produced anything yet
+    n_stale_frames = 0
 
     l0 = read_arm_state(left_ph, left_pkt, cal["left"], "left")
     r0 = read_arm_state(right_ph, right_pkt, cal["right"], "right")
@@ -349,6 +439,16 @@ def main() -> None:
         while not interrupted and (time.time() - start_t) < args.max_episode_s:
             tick0 = time.time()
 
+            # Check camera threads for errors each loop iteration
+            for thread, label in [
+                (rs_thread, "RealSense"),
+                (left_cam_thread, "LEFT wrist"),
+                (right_cam_thread, "RIGHT wrist"),
+            ]:
+                if thread.error:
+                    raise RuntimeError(f"{label} camera thread died: {thread.error}")
+
+            # Drain ZMQ (unchanged)
             new_targets = None
             while True:
                 events = dict(poller.poll(timeout=0))
@@ -397,6 +497,7 @@ def main() -> None:
                 time.sleep(period)
                 continue
 
+            # --- Motor write/read (unchanged) ---
             if arm_anchor is not None and zmq_anchor is not None:
                 desired = arm_anchor + (last_target - zmq_anchor)
             else:
@@ -416,9 +517,18 @@ def main() -> None:
             r_state = read_arm_state(right_ph, right_pkt, cal["right"], "right")
             state12 = np.concatenate([l_state, r_state]).astype(np.float32)
 
-            top = grab_realsense_rgb(rs_pipe)
-            lf = grab_v4l2_rgb(left_cam)
-            rf = grab_v4l2_rgb(right_cam)
+            # --- Non-blocking camera reads from background threads ---
+            top  = rs_thread.get()
+            lf   = left_cam_thread.get()
+            rf   = right_cam_thread.get()
+
+            if top is None or lf is None or rf is None:
+                # Should not happen after wait_ready(), but guard anyway
+                n_stale_frames += 1
+                elapsed = time.time() - tick0
+                if elapsed < period:
+                    time.sleep(period - elapsed)
+                continue
 
             ds.add_frame({
                 "observation.state": state12,
@@ -430,20 +540,33 @@ def main() -> None:
             })
             n_frames += 1
             if n_frames % 30 == 1:
+                loop_ms = (time.time() - tick0) * 1000
                 print(
                     f"  t={time.time()-start_t:5.2f}s  frame={n_frames:>4}  "
-                    f"L_lift_obs={l_state[1]:+.2f}  L_lift_cmd={cmd_rad[1]:+.2f}  L_lift_tgt={last_target[1]:+.2f}  "
+                    f"loop={loop_ms:4.1f}ms  "
+                    f"L_lift_obs={l_state[1]:+.2f}  L_lift_cmd={cmd_rad[1]:+.2f}  "
+                    f"L_lift_tgt={last_target[1]:+.2f}  "
                     f"R_lift_obs={r_state[1]:+.2f}  R_lift_cmd={cmd_rad[7]:+.2f}"
                 )
 
             elapsed = time.time() - tick0
             if elapsed < period:
                 time.sleep(period - elapsed)
+
     finally:
         print(
             f"\n[record] stopping. captured {n_frames} frames in "
-            f"{time.time()-start_t:.1f}s."
+            f"{time.time()-start_t:.1f}s"
+            + (f" ({n_stale_frames} skipped: stale camera frame)" if n_stale_frames else "")
+            + "."
         )
+
+        # Stop camera threads before closing everything else
+        for thread in (rs_thread, left_cam_thread, right_cam_thread):
+            thread.stop()
+        for thread in (rs_thread, left_cam_thread, right_cam_thread):
+            thread.join(timeout=3.0)
+
         try:
             if n_frames > 0:
                 ds.save_episode()
@@ -457,15 +580,6 @@ def main() -> None:
             sock.close(0)
         except Exception:
             pass
-        try:
-            rs_pipe.stop()
-        except Exception:
-            pass
-        for cap in (left_cam, right_cam):
-            try:
-                cap.release()
-            except Exception:
-                pass
         for ph in (left_ph, right_ph):
             try:
                 ph.closePort()
