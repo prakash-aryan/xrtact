@@ -475,6 +475,14 @@ def main() -> None:
                            for i, j in enumerate(JOINTS)],
                         dtype=np.float32,
                     )
+                    # On first ZMQ packet, anchor relative tracking to the
+                    # current physical arm pose so teleop is safe before record.
+                    if arm_anchor is None:
+                        l_state = read_arm_state(left_ph, left_pkt, cal["left"], "left")
+                        r_state = read_arm_state(right_ph, right_pkt, cal["right"], "right")
+                        arm_anchor = np.concatenate([l_state, r_state]).astype(np.float32)
+                        zmq_anchor = last_target.copy()
+                        print("[record] anchor set from first ZMQ packet — teleop active")
                 rec = bool(new_targets.get("recording", False))
                 if rec != last_recording_flag:
                     print(f"[record] recording flag -> {rec}")
