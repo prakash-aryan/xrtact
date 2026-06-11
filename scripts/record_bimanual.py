@@ -3,7 +3,12 @@
 Camera capture runs in background threads (one per camera) so the control
 loop is no longer blocked by frame acquisition. Each thread grabs
 continuously into a shared slot; the main loop reads the latest slot
-without waiting, lifting the effective rate from ~10 Hz toward 30 Hz.
+without waiting.
+
+Motor I/O uses GroupSyncWrite (one broadcast packet per arm instead of 6
+individual write round-trips) and GroupSyncRead (one TX + buffered responses
+instead of 6 individual read RTTs). State reads are skipped when not
+recording, reducing per-tick serial transactions from 24 to 2.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 import zmq
-from scservo_sdk import COMM_SUCCESS, PacketHandler, PortHandler
+from scservo_sdk import COMM_SUCCESS, GroupSyncRead, GroupSyncWrite, PacketHandler, PortHandler
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -303,6 +308,23 @@ def write_arm_action(
                 break
 
 
+def write_arm_sync(gsw: GroupSyncWrite, calib: dict, action_rad: np.ndarray, side: str) -> None:
+    gsw.clearParam()
+    for i, jname in enumerate(JOINTS):
+        raw = urdf_rad_to_raw(float(action_rad[i]), jname, calib[jname], side)
+        gsw.addParam(calib[jname]["id"], [raw & 0xFF, (raw >> 8) & 0xFF])
+    gsw.txPacket()
+
+
+def read_arm_state_sync(gsr: GroupSyncRead, calib: dict, side: str) -> np.ndarray:
+    gsr.txRxPacket()
+    out = np.zeros(6, dtype=np.float32)
+    for i, jname in enumerate(JOINTS):
+        raw = gsr.getData(calib[jname]["id"], ADDR_PRESENT_POSITION, 2)
+        out[i] = raw_to_urdf_rad(raw, jname, calib[jname], side)
+    return out
+
+
 def make_features() -> dict:
     state_or_action = {
         "dtype": "float32",
@@ -380,6 +402,16 @@ def main() -> None:
     print("[2/3] engaging torque on both arms (hold current pose)...")
     force_torque_on(LEFT_PORT)
     force_torque_on(RIGHT_PORT)
+
+    # Sync write: 1 broadcast per arm instead of 6 individual writes
+    left_gsw  = GroupSyncWrite(left_ph,  left_pkt,  ADDR_GOAL_POSITION,    2)
+    right_gsw = GroupSyncWrite(right_ph, right_pkt, ADDR_GOAL_POSITION,    2)
+    # Sync read: 1 TX + N buffered responses instead of 6 individual RTTs
+    left_gsr  = GroupSyncRead(left_ph,   left_pkt,  ADDR_PRESENT_POSITION, 2)
+    right_gsr = GroupSyncRead(right_ph,  right_pkt, ADDR_PRESENT_POSITION, 2)
+    for jname in JOINTS:
+        left_gsr.addParam(cal["left"][jname]["id"])
+        right_gsr.addParam(cal["right"][jname]["id"])
 
     # --- ZMQ ---
     print(f"[3/3] subscribing to telegrip on {args.zmq_endpoint}...")
@@ -504,14 +536,10 @@ def main() -> None:
             cmd_rad = cmd_rad + delta
 
             try:
-                write_arm_action(left_ph, left_pkt, cal["left"], cmd_rad[:6], "left")
-                write_arm_action(right_ph, right_pkt, cal["right"], cmd_rad[6:], "right")
+                write_arm_sync(left_gsw,  cal["left"],  cmd_rad[:6], "left")
+                write_arm_sync(right_gsw, cal["right"], cmd_rad[6:], "right")
             except Exception as e:
-                print(f"[record] write_arm_action error: {e}")
-
-            l_state = read_arm_state(left_ph, left_pkt, cal["left"], "left")
-            r_state = read_arm_state(right_ph, right_pkt, cal["right"], "right")
-            state12 = np.concatenate([l_state, r_state]).astype(np.float32)
+                print(f"[record] write_arm_sync error: {e}")
 
             # --- Non-blocking camera reads from background threads ---
             top  = rs_thread.get()
@@ -526,6 +554,11 @@ def main() -> None:
                     if elapsed < period:
                         time.sleep(period - elapsed)
                     continue
+
+                # Read state only when recording (avoids 12 serial RTTs on every tick)
+                l_state = read_arm_state_sync(left_gsr,  cal["left"],  "left")
+                r_state = read_arm_state_sync(right_gsr, cal["right"], "right")
+                state12 = np.concatenate([l_state, r_state]).astype(np.float32)
 
                 ds.add_frame({
                     "observation.state": state12,
