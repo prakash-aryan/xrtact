@@ -233,12 +233,7 @@ def urdf_rad_to_raw(rad: float, jname: str, calib_entry: dict, side: str) -> int
 
 def lerobot_value_to_urdf_rad(val: float, jname: str, calib_entry: dict, side: str) -> float:
     homing = calib_entry["homing_offset"]
-    if jname == "gripper":
-        rmin, rmax = calib_entry["range_min"], calib_entry["range_max"]
-        pct = float(np.clip((45.0 - val) / 45.0 * 100.0, 0.0, 100.0))
-        raw = int(round(rmin + pct / 100.0 * (rmax - rmin)))
-    else:
-        raw = int(round(homing + val / 360.0 * 4096))
+    raw = int(round(homing + val / 360.0 * 4096))
     return raw_to_urdf_rad(raw, jname, calib_entry, side)
 
 
