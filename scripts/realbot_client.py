@@ -26,9 +26,9 @@ N_STEPS = 600
 
 LEFT_PORT = os.environ.get("XRTACT_LEFT_PORT", "/dev/ttyACM0")
 RIGHT_PORT = os.environ.get("XRTACT_RIGHT_PORT", "/dev/ttyACM1")
-LEFT_CAM_INDEX = int(os.environ.get("XRTACT_LEFT_CAM_INDEX", "10"))
-RIGHT_CAM_INDEX = int(os.environ.get("XRTACT_RIGHT_CAM_INDEX", "8"))
-REALSENSE_SERIAL = os.environ.get("XRTACT_REALSENSE_SERIAL", "")
+LEFT_CAM_INDEX = int(os.environ.get("XRTACT_LEFT_CAM_INDEX", "4"))
+RIGHT_CAM_INDEX = int(os.environ.get("XRTACT_RIGHT_CAM_INDEX", "6"))
+REALSENSE_SERIAL = os.environ.get("XRTACT_REALSENSE_SERIAL", "317622071570")
 if not REALSENSE_SERIAL:
     raise RuntimeError(
         "Set XRTACT_REALSENSE_SERIAL to your RealSense's serial number "

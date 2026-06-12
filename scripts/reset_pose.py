@@ -20,14 +20,14 @@ ADDR_TORQUE_ENABLE = 40
 ADDR_GOAL_POSITION = 42
 ADDR_PRESENT_POSITION = 56
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_POSE = os.path.join(HERE, "home_pose.json")
+DEFAULT_POSE = os.path.join(HERE, "zero_pose.json")
 EXAMPLE_POSE = os.path.join(HERE, "home_pose.example.json")
 PORTS = {
     "left":  os.environ.get("XRTACT_LEFT_PORT",  "/dev/ttyACM0"),
     "right": os.environ.get("XRTACT_RIGHT_PORT", "/dev/ttyACM1"),
 }
 
-
+print(HERE)
 def home_one_arm(side: str, port: str, target: dict[str, int],
                  duration: float, rate: float) -> None:
     print(f"\n[{side}] connecting to {port}")
