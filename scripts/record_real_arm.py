@@ -69,7 +69,7 @@ JOINT_NAMES = [
 ARM_PORTS = {"left": "/dev/ttyACM0", "right": "/dev/ttyACM1"}
 ARM_IDS = {"right": "right_follower", "left": "left_follower"}
 REALSENSE_SERIAL = "317622071570"
-WRIST_CAM_INDEX = 2  # /dev/video2 - the Logitech that opens after RealSense connects
+WRIST_CAM_INDEX = 6  # /dev/video2 - the Logitech that opens after RealSense connects
 
 
 def make_features(image_h: int, image_w: int) -> dict:
