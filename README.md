@@ -157,6 +157,15 @@ docker run --rm -d --gpus all -p 8080:8080 --name lehome_realbot merabro/lehome-
 python scripts/realbot_client.py    # set DRY_RUN=False inside to actually move motors
 ```
 
+
+### Run recording pipeline
+```bash
+python scripts/make_demo.py \
+    --repo-id local/realarm_bimanual_foldshirt_v1 \
+    --task "Fold the full-sleeve shirt." \
+    --max-episode-s 600
+```
+
 ## Known issues
 
 - **Coordinate-frame mismatch (telegrip ↔ real arms).** `telegrip` runs IK in PyBullet (URDF frame) but writes via `lerobot.SOFollower` which interprets values in the lerobot-calibration frame. The two are usually NOT the same physical position. The recorder works around this with **anchor mode**: when you press X+A it captures `(arm_pose, zmq_target)` and from then on commands `arm = arm_anchor + (zmq_target - zmq_anchor)`, so the arm tracks the *delta* of your hand motion rather than the absolute IK output. PyBullet visualization will still look offset from the real arm - that is the same root cause.
@@ -186,13 +195,13 @@ To do (resolve open issues first; recording comes after):
 
 Pre-recording fixes:
 
-- [ ] Mount RealSense at the sim camera height (~50-60 cm above table) so the policy actually sees the workspace, not just the cloth
-- [ ] Aim wrist cameras forward + slightly down so the gripper jaws sit at frame bottom (matching the sim wrist-cam pose)
-- [ ] Decouple camera capture from the control loop (background thread) to lift the recorder off the current ~10 Hz floor toward 30 Hz
-- [ ] Decouple recording from motor writes (currently the X+A flag gates both - separate them so the operator can teleop without recording every time)
-- [ ] Re-calibrate lerobot at the URDF zero pose (or patch telegrip's `SOFollower` boundary) so PyBullet visualisation matches the real arms and anchor mode is no longer needed
-- [ ] Confirm per-joint `INVERT` signs across all 12 joints empirically (currently 3 are guessed)
-- [ ] Add `make_demo` Python entrypoint that runs the whole record cycle (home → telegrip → tunnel → recorder) from one command
+- [x] Mount RealSense at the sim camera height (~50-60 cm above table) so the policy actually sees the workspace, not just the cloth
+- [x] Aim wrist cameras forward + slightly down so the gripper jaws sit at frame bottom (matching the sim wrist-cam pose)
+- [X] Decouple camera capture from the control loop (background thread) to lift the recorder off the current ~10 Hz floor toward 30 Hz
+- [x] Decouple recording from motor writes (currently the X+A flag gates both - separate them so the operator can teleop without recording every time)
+- [X] Re-calibrate lerobot at the URDF zero pose (or patch telegrip's `SOFollower` boundary) so PyBullet visualisation matches the real arms and anchor mode is no longer needed
+- [x] Confirm per-joint `INVERT` signs across all 12 joints empirically (currently 3 are guessed)
+- [x] Add `make_demo` Python entrypoint that runs the whole record cycle (home → telegrip → tunnel → recorder) from one command
 - [ ] Ship a small Web UI tile that visualises the recording flag + episode counter so the operator doesn't need to read terminal logs
 
 Recording + training (after the above):
