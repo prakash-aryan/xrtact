@@ -14,6 +14,7 @@ import signal
 import time
 
 from scservo_sdk import COMM_SUCCESS, PacketHandler, PortHandler
+# if this import fails: pip install feetech-servo-sdk
 
 ADDR_TORQUE_ENABLE = 40
 ADDR_GOAL_POSITION = 42
